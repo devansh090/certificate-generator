@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { loadCertificate, saveCertificate } from "./certStore";
 import { CERT_FONTS } from "./fonts";
 
 // canvas can't read CSS vars, so resolve next/font's generated family names
@@ -49,7 +50,15 @@ export default function Home() {
     };
   }, [img, name, pos, fontSize, font, bold, color]);
 
-  function loadFile(file?: File) {
+  useEffect(() => {
+    // restore the certificate from the previous visit; storage may be unavailable (private mode), so ignore failures
+    loadCertificate()
+      .then((file) => file && loadFile(file, false))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function loadFile(file?: File, persist = true) {
     if (!file) return;
     if (!["image/png", "image/jpeg"].includes(file.type)) {
       setError("Please use a PNG or JPG image.");
@@ -61,6 +70,7 @@ export default function Home() {
       if (img) URL.revokeObjectURL(img.src);
       setImg(image);
       setFileName(file.name);
+      if (persist) saveCertificate(file).catch(() => setError("Couldn't save the certificate for next time."));
     };
     image.src = URL.createObjectURL(file);
   }
