@@ -10,7 +10,69 @@ function resolveFont(value: string) {
   return value.replace(/var\((--[\w-]+)\)/g, (_, v) => root.getPropertyValue(v));
 }
 
+// wrap explicit lines (\n) to maxWidth on word boundaries
+function wrap(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  return text.split("\n").flatMap((para) => {
+    const lines: string[] = [];
+    let line = "";
+    for (const word of para.split(" ")) {
+      const next = line ? `${line} ${word}` : word;
+      if (line && ctx.measureText(next).width > maxWidth) {
+        lines.push(line);
+        line = word;
+      } else line = next;
+    }
+    return [...lines, line];
+  });
+}
+
 const label = "font-mono text-[11px] uppercase tracking-[0.14em] text-ink-soft";
+
+type Field = {
+  label: string;
+  text: string;
+  x: number; // visual centre of the text block, as fraction of image size
+  y: number;
+  width: number; // wrap width, fraction of image width
+  size: number; // % of image width
+  font: string;
+  bold: boolean;
+  italic: boolean;
+  color: string;
+  erase?: { x: number; y: number; w: number; h: number }; // template area painted white first, to hide a baked-in original
+};
+
+const fontOf = (label: string) => CERT_FONTS.find((f) => f.label === label)!.value;
+
+const DEFAULT_FIELDS: Field[] = [
+  { label: "Name", text: "", x: 0.5, y: 0.475, width: 0.8, size: 4.5, font: CERT_FONTS[0].value, bold: true, italic: false, color: "#1c1a17" },
+  {
+    label: "Description",
+    text: "who attended our 10-week AI Engineering Program covering AI terminology, Retrieval Augmented Generation, Agentic Systems, Evals, and built a Capstone Project.",
+    x: 0.5,
+    y: 0.565,
+    width: 0.62,
+    size: 1.6,
+    font: fontOf("Roboto"),
+    bold: false,
+    italic: false,
+    color: "#000000",
+  },
+  {
+    label: "Tagline",
+    text: "Your attention is precious. Thank you for sharing it with us.",
+    x: 0.5,
+    y: 0.6393,
+    width: 0.8,
+    size: 1.36,
+    font: fontOf("Montserrat"),
+    bold: true,
+    italic: true,
+    color: "#000000",
+    // ponytail: hardcoded to the AIEngg template's baked-in tagline (x 578–1420, y 891–917 of 2000×1414)
+    erase: { x: 0.28, y: 0.622, w: 0.44, h: 0.036 },
+  },
+];
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -19,36 +81,45 @@ export default function Home() {
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
-  const [name, setName] = useState("");
-  const [pos, setPos] = useState({ x: 0.5, y: 0.475 }); // visual centre of the name, as fraction of image size
-  const [fontSize, setFontSize] = useState(4.5); // % of image width
-  const [font, setFont] = useState(CERT_FONTS[0].value);
-  const [bold, setBold] = useState(true);
-  const [color, setColor] = useState("#1c1a17");
+  const [fields, setFields] = useState(DEFAULT_FIELDS);
+  const [active, setActive] = useState(0);
+  const field = fields[active];
+  const name = fields[0].text;
+  const setField = (patch: Partial<Field>) => setFields((fs) => fs.map((f, i) => (i === active ? { ...f, ...patch } : f)));
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !img) return;
     let cancelled = false;
-    const css = `${bold ? "bold " : ""}${(fontSize / 100) * img.naturalWidth}px ${resolveFont(font)}`;
-    document.fonts.load(css, name || "A").finally(() => {
+    const W = img.naturalWidth;
+    const fontCss = (f: Field) => `${f.italic ? "italic " : ""}${f.bold ? "bold " : ""}${(f.size / 100) * W}px ${resolveFont(f.font)}`;
+    Promise.allSettled(fields.map((f) => document.fonts.load(fontCss(f), f.text || "A"))).then(() => {
       if (cancelled) return;
-      canvas.width = img.naturalWidth;
+      canvas.width = W;
       canvas.height = img.naturalHeight;
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(img, 0, 0);
-      ctx.font = css;
-      ctx.fillStyle = color;
+      ctx.fillStyle = "#fff";
+      for (const { erase: e } of fields) if (e) ctx.fillRect(e.x * W, e.y * canvas.height, e.w * W, e.h * canvas.height);
       ctx.textAlign = "center";
-      // centre on the actual glyphs so the same position works for every font
-      const m = ctx.measureText(name);
-      const dy = (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2;
-      ctx.fillText(name, pos.x * canvas.width, pos.y * canvas.height + dy);
+      for (const f of fields) {
+        ctx.font = fontCss(f);
+        ctx.fillStyle = f.color;
+        const lines = wrap(ctx, f.text, f.width * W);
+        const lh = (f.size / 100) * W * 1.4;
+        const top = f.y * canvas.height - ((lines.length - 1) * lh) / 2;
+        lines.forEach((line, i) => {
+          // centre on the actual glyphs so the same position works for every font
+          const m = ctx.measureText(line || "A");
+          const dy = (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2;
+          ctx.fillText(line, f.x * W, top + i * lh + dy);
+        });
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [img, name, pos, fontSize, font, bold, color]);
+  }, [img, fields]);
 
   useEffect(() => {
     // restore the certificate from the previous visit; storage may be unavailable (private mode), so ignore failures
@@ -83,7 +154,7 @@ export default function Home() {
 
   function onCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
     const r = e.currentTarget.getBoundingClientRect();
-    setPos({ x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height });
+    setField({ x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height });
   }
 
   async function download() {
@@ -127,18 +198,52 @@ export default function Home() {
           <input
             className="border-b-2 border-rule bg-transparent pb-1.5 font-display text-2xl outline-none transition-colors placeholder:text-rule focus:border-accent"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onFocus={() => setActive(0)}
+            onChange={(e) => setFields((fs) => fs.map((f, i) => (i === 0 ? { ...f, text: e.target.value } : f)))}
             placeholder="Jane Doe"
           />
         </label>
+
+        {fields.slice(1).map((f, j) => {
+          const idx = j + 1;
+          return (
+            <label key={f.label} className="flex flex-col gap-2">
+              <span className={label}>{f.label}</span>
+              <textarea
+                rows={f.label === "Description" ? 4 : 2}
+                className="resize-y rounded-md border border-rule bg-paper px-2.5 py-2 text-sm leading-relaxed outline-none focus:border-accent"
+                value={f.text}
+                onFocus={() => setActive(idx)}
+                onChange={(e) => setFields((fs) => fs.map((x, i) => (i === idx ? { ...x, text: e.target.value } : x)))}
+              />
+            </label>
+          );
+        })}
+
+        <hr className="border-rule" />
+
+        <div className="flex flex-col gap-2">
+          <span className={label}>Styling</span>
+          <div className="grid grid-cols-3 rounded-md border border-rule p-0.5 text-sm">
+            {fields.map((f, i) => (
+              <button
+                key={f.label}
+                onClick={() => setActive(i)}
+                className={`rounded px-3 py-1.5 transition-colors ${i === active ? "bg-foreground text-background" : "hover:text-accent"}`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div className="grid grid-cols-[1fr_auto] gap-4">
           <label className="flex flex-col gap-2">
             <span className={label}>Typeface</span>
             <select
               className="rounded-md border border-rule bg-paper px-2.5 py-2 text-sm outline-none focus:border-accent"
-              value={font}
-              onChange={(e) => setFont(e.target.value)}
+              value={field.font}
+              onChange={(e) => setField({ font: e.target.value })}
             >
               {CERT_FONTS.map((f) => (
                 <option key={f.label} value={f.value}>
@@ -151,8 +256,8 @@ export default function Home() {
             <span className={label}>Ink</span>
             <input
               type="color"
-              value={color}
-              onChange={(e) => setColor(e.target.value)}
+              value={field.color}
+              onChange={(e) => setField({ color: e.target.value })}
               className="h-[38px] w-14 cursor-pointer rounded-md border border-rule bg-paper p-1"
             />
           </label>
@@ -160,42 +265,57 @@ export default function Home() {
 
         <label className="flex flex-col gap-2">
           <span className={`${label} flex justify-between`}>
-            Size <span>{fontSize.toFixed(1)}%</span>
+            Size <span>{field.size.toFixed(1)}%</span>
           </span>
           <input
             type="range"
-            min={1}
+            min={0.5}
             max={15}
-            step={0.5}
-            value={fontSize}
-            onChange={(e) => setFontSize(+e.target.value)}
+            step={0.1}
+            value={field.size}
+            onChange={(e) => setField({ size: +e.target.value })}
             className="accent-accent"
           />
         </label>
 
-        <div className="grid grid-cols-2 gap-4">
-          {(["x", "y"] as const).map((axis) => (
-            <label key={axis} className="flex flex-col gap-2">
+        <div className="grid grid-cols-3 gap-4">
+          {(
+            [
+              ["x", "X"],
+              ["y", "Y"],
+              ["width", "Wrap"],
+            ] as const
+          ).map(([key, text]) => (
+            <label key={key} className="flex flex-col gap-2">
               <span className={`${label} flex justify-between`}>
-                {axis === "x" ? "Horizontal" : "Vertical"} <span>{(pos[axis] * 100).toFixed(1)}%</span>
+                {text} <span>{(field[key] * 100).toFixed(0)}%</span>
               </span>
               <input
                 type="range"
-                min={0}
+                min={key === "width" ? 0.1 : 0}
                 max={1}
                 step={0.0025}
-                value={pos[axis]}
-                onChange={(e) => setPos({ ...pos, [axis]: +e.target.value })}
+                value={field[key]}
+                onChange={(e) => setField({ [key]: +e.target.value })}
                 className="accent-accent"
               />
             </label>
           ))}
         </div>
 
-        <label className="flex cursor-pointer items-center gap-2.5 text-sm">
-          <input type="checkbox" checked={bold} onChange={(e) => setBold(e.target.checked)} className="accent-accent" />
-          Bold
-        </label>
+        <div className="flex gap-6">
+          {(["bold", "italic"] as const).map((key) => (
+            <label key={key} className="flex cursor-pointer items-center gap-2.5 text-sm capitalize">
+              <input
+                type="checkbox"
+                checked={field[key]}
+                onChange={(e) => setField({ [key]: e.target.checked })}
+                className="accent-accent"
+              />
+              {key}
+            </label>
+          ))}
+        </div>
 
         <button
           onClick={download}
@@ -223,7 +343,7 @@ export default function Home() {
           <>
             <div className="mb-3 flex items-center justify-between gap-4">
               <p className={`${label} truncate`}>
-                {fileName} · {img.naturalWidth}×{img.naturalHeight} · click to place name
+                {fileName} · {img.naturalWidth}×{img.naturalHeight} · click to place {field.label.toLowerCase()}
               </p>
               <button
                 onClick={() => inputRef.current?.click()}
